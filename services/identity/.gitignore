@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+.venv/
+.env
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.idea/
+.vscode/
+coverage.xml
+htmlcov/
+
+# Приватный ключ — даже dev-версию не коммитим
+secrets/private.pem

@@ -1,0 +1,13 @@
+from typing import Protocol
+from uuid import UUID
+from app.domain.entities.project_invitation import ProjectInvitation
+
+
+class InvitationRepository(Protocol):
+    async def create(self, invitation: ProjectInvitation) -> ProjectInvitation: ...
+
+    async def get(self, invitation_id: UUID) -> ProjectInvitation | None: ...
+
+    async def update(self, invitation: ProjectInvitation) -> ProjectInvitation: ...
+
+    async def list_for_user(self, user_id: UUID) -> list[ProjectInvitation]: ...

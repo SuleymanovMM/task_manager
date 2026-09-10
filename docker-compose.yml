@@ -1,0 +1,275 @@
+services:
+  # ─── Прокси ───
+  nginx:
+    image: nginx:alpine
+    ports:
+      - "80:80"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      identity-service:
+        condition: service_healthy
+      project-service:
+        condition: service_healthy
+      task-service-1:
+        condition: service_healthy
+      task-service-2:
+        condition: service_healthy
+      notification-service:
+        condition: service_healthy
+    networks:
+      - taskflow-network
+
+  # ─── Identity ───
+  identity-service:
+    build: ./services/identity
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://identity_user:identity_pass@postgres-identity:5432/identity_db
+      - REDIS_URL=redis://redis:6379/0
+      - ACCESS_TOKEN_EXPIRE_MINUTES=15
+      - REFRESH_TOKEN_EXPIRE_DAYS=7
+      - LOG_LEVEL=info
+    ports:
+      - "8001:8000"
+    depends_on:
+      postgres-identity:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - taskflow-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ─── Project ───
+  project-service:
+    build: ./services/project
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://project_user:project_pass@postgres-project:5432/project_db
+      - RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672/
+      - IDENTITY_SERVICE_URL=http://identity-service:8000
+      - LOG_LEVEL=info
+    ports:
+      - "8002:8001"
+    depends_on:
+      postgres-project:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      - taskflow-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ─── Task (реплика 1) ───
+  task-service-1:
+    build: ./services/task
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://task_user:task_pass@postgres-task:5432/task_db
+      - REDIS_URL=redis://redis:6379/2
+      - RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672/
+      - PROJECT_SERVICE_URL=http://project-service:8001
+      - IDENTITY_SERVICE_URL=http://identity-service:8000
+      - LOG_LEVEL=info
+    ports:
+      - "8003:8002"
+    depends_on:
+      postgres-task:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      project-service:
+        condition: service_healthy
+    networks:
+      - taskflow-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8002/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ─── Task (реплика 2) ───
+  # Делит task_db с репликой 1. Миграции гоняет только реплика 1 (её дефолтный
+  # CMD); эта сразу стартует uvicorn и ждёт реплику 1 healthy — иначе гонка на
+  # создании alembic_version.
+  task-service-2:
+    build: ./services/task
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8002
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://task_user:task_pass@postgres-task:5432/task_db
+      - REDIS_URL=redis://redis:6379/2
+      - RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672/
+      - PROJECT_SERVICE_URL=http://project-service:8001
+      - IDENTITY_SERVICE_URL=http://identity-service:8000
+      - LOG_LEVEL=info
+    ports:
+      - "8004:8002"
+    depends_on:
+      task-service-1:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      project-service:
+        condition: service_healthy
+    networks:
+      - taskflow-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8002/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ─── Notification ───
+  notification-service:
+    build: ./services/notification
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://notification_user:notification_pass@postgres-notification:5432/notification_db
+      - RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672/
+      - RABBITMQ_EXCHANGE=taskflow.events
+      - IDENTITY_SERVICE_URL=http://identity-service:8000
+      - LOG_LEVEL=info
+    ports:
+      - "8005:8003"
+    depends_on:
+      postgres-notification:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      - taskflow-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8003/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ─── PostgreSQL: Identity ───
+  postgres-identity:
+    image: postgres:16-alpine
+    environment:
+      - POSTGRES_USER=identity_user
+      - POSTGRES_PASSWORD=identity_pass
+      - POSTGRES_DB=identity_db
+    volumes:
+      - postgres_identity_data:/var/lib/postgresql/data
+    networks:
+      - taskflow-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U identity_user -d identity_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # ─── PostgreSQL: Project ───
+  postgres-project:
+    image: postgres:16-alpine
+    environment:
+      - POSTGRES_USER=project_user
+      - POSTGRES_PASSWORD=project_pass
+      - POSTGRES_DB=project_db
+    volumes:
+      - postgres_project_data:/var/lib/postgresql/data
+    networks:
+      - taskflow-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U project_user -d project_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # ─── PostgreSQL: Task ───
+  postgres-task:
+    image: postgres:16-alpine
+    environment:
+      - POSTGRES_USER=task_user
+      - POSTGRES_PASSWORD=task_pass
+      - POSTGRES_DB=task_db
+    volumes:
+      - postgres_task_data:/var/lib/postgresql/data
+    networks:
+      - taskflow-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U task_user -d task_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # ─── PostgreSQL: Notification ───
+  postgres-notification:
+    image: postgres:16-alpine
+    environment:
+      - POSTGRES_USER=notification_user
+      - POSTGRES_PASSWORD=notification_pass
+      - POSTGRES_DB=notification_db
+    volumes:
+      - postgres_notification_data:/var/lib/postgresql/data
+    networks:
+      - taskflow-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U notification_user -d notification_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # ─── Redis ───
+  redis:
+    image: redis:7-alpine
+    volumes:
+      - redis_data:/data
+    networks:
+      - taskflow-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # ─── RabbitMQ ───
+  rabbitmq:
+    image: rabbitmq:3-management-alpine
+    environment:
+      - RABBITMQ_DEFAULT_USER=guest
+      - RABBITMQ_DEFAULT_PASS=guest
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    ports:
+      - "15672:15672" # веб-интерфейс управления
+    networks:
+      - taskflow-network
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ─── Prometheus ───
+  prometheus:
+    image: prom/prometheus:latest
+    volumes:
+      - ./infrastructure/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "9090:9090"
+    networks:
+      - taskflow-network
+
+volumes:
+  postgres_identity_data:
+  postgres_project_data:
+  postgres_task_data:
+  postgres_notification_data:
+  redis_data:
+  rabbitmq_data:
+
+networks:
+  taskflow-network:
+    driver: bridge
